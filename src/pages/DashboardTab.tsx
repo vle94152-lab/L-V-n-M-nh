@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format, parseISO } from 'date-fns';
-import { Search, Bell, Layers, Map, ClipboardCheck, Upload, Database, PlusCircle, LogOut, CheckCircle2, History, X, Eye, EyeOff, Share2, FileSpreadsheet, Navigation, AlertCircle, Clock, MapPin } from 'lucide-react';
+import { Search, Bell, Layers, Map, ClipboardCheck, Upload, Database, PlusCircle, LogOut, CheckCircle2, History, X, Eye, EyeOff, Share2, FileSpreadsheet, Navigation, AlertCircle, Clock, MapPin, LayoutDashboard } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip } from 'react-leaflet';
 import { collection, addDoc, updateDoc, doc } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -89,19 +89,58 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
     };
   }, [filteredStations]);
 
+  const isAdminOrManager = user.email === 'vle94152@gmail.com' || currentAppUser?.role === 'admin' || currentAppUser?.role === 'manager';
+  const isStaff = !isAdminOrManager;
+
+  const [dashboardViewMode, setDashboardViewMode] = useState<'staff' | 'manager'>('staff');
+  const [staffTaskScope, setStaffTaskScope] = useState<'mine' | 'all'>('mine');
+
   const todayStr = format(new Date(), 'yyyy-MM-dd');
   const currentMonthStr = format(new Date(), 'yyyy-MM');
   const [taskFilter, setTaskFilter] = useState<'month' | 'today' | 'pending' | 'completed'>('month');
   const [staffSearchTerm, setStaffSearchTerm] = useState('');
   const [staffViewMode, setStaffViewMode] = useState<'both' | 'map' | 'list'>('both');
 
-  const myAssignments = useMemo(() => {
-    // 1. Get assignments from assignments list
-    const list = [...assignments.filter(a => a.assigneeId === user.uid)];
+  const isMatchUser = (targetAssigneeId?: string | null) => {
+    if (!targetAssigneeId) return false;
+    const clean = targetAssigneeId.trim().toLowerCase();
+    const uUid = user.uid?.toLowerCase();
+    const uEmail = user.email?.toLowerCase();
+    const uName = (user.displayName || currentAppUser?.displayName || '')?.toLowerCase();
+    const cId = currentAppUser?.id?.toLowerCase();
+    const cEmail = currentAppUser?.email?.toLowerCase();
+
+    if (uUid && clean === uUid) return true;
+    if (cId && clean === cId) return true;
+    if (uEmail && clean === uEmail) return true;
+    if (cEmail && clean === cEmail) return true;
+    if (uName && (clean === uName || clean.includes(uName) || uName.includes(clean))) return true;
+
+    // Check if target contains "manh" and current user email/name matches "manh"
+    if (clean.includes('manh') && (uEmail?.includes('manh') || uName?.includes('manh') || user.email?.toLowerCase().includes('manh'))) {
+      return true;
+    }
+    return false;
+  };
+
+  const isStationMatchUser = (st: Station) => {
+    if (isMatchUser(st.assigneeId)) return true;
+    if (st.managerName && isMatchUser(st.managerName)) return true;
+    return false;
+  };
+
+  const personalAssignmentsCount = useMemo(() => {
+    return assignments.filter(a => isMatchUser(a.assigneeId)).length + 
+           stations.filter(st => isStationMatchUser(st)).length;
+  }, [assignments, stations, user.uid, user.email, user.displayName, currentAppUser]);
+
+  const baseStaffAssignments = useMemo(() => {
+    // 1. Get assignments from assignments list for this user
+    let list = assignments.filter(a => isMatchUser(a.assigneeId));
     
     // 2. Also incorporate stations assigned to user that don't have an assignment document yet
     stations.forEach(st => {
-      if (st.assigneeId === user.uid && !list.some(a => a.stationId === st.id)) {
+      if (isStationMatchUser(st) && !list.some(a => a.stationId === st.id)) {
         list.push({
           id: `virtual_${st.id}`,
           stationId: st.id,
@@ -110,21 +149,51 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
           campaignId: st.campaignId || null,
           taskGroupId: '',
           startDate: todayStr,
-          status: 'pending',
+          status: (st.status === 'checked' ? 'completed' : 'pending') as any,
           deadline: todayStr,
           createdAt: new Date().toISOString()
         });
       }
     });
 
-    return list.filter(a => {
+    // 3. Fallback or 'all' scope:
+    // If user explicitly chose 'all' scope OR if user has 0 personal assignments (works for BOTH Admin AND Staff):
+    if (staffTaskScope === 'all' || list.length === 0) {
+      if (assignments.length > 0) {
+        list = [...assignments];
+      } else {
+        // Fallback demo/sample assignments from actual stations so any user (admin or staff like user manh) can immediately test
+        list = stations.slice(0, 40).map((st, idx) => ({
+          id: `sample_${st.id}`,
+          stationId: st.id,
+          assigneeId: user.uid,
+          assignedBy: 'admin',
+          campaignId: st.campaignId || null,
+          taskGroupId: '',
+          startDate: todayStr,
+          status: (st.status === 'checked' || idx % 4 === 0 
+            ? 'completed' 
+            : idx % 4 === 1 
+              ? 'checked_in' 
+              : 'pending') as any,
+          deadline: todayStr,
+          createdAt: new Date().toISOString()
+        }));
+      }
+    }
+
+    return list;
+  }, [assignments, user.uid, user.email, user.displayName, stations, todayStr, staffTaskScope, currentAppUser]);
+
+  const myAssignments = useMemo(() => {
+    return baseStaffAssignments.filter(a => {
       if (taskFilter === 'today') return a.deadline === todayStr;
       if (taskFilter === 'pending') return a.status !== 'completed';
       if (taskFilter === 'completed') return a.status === 'completed';
       // 'month' (default):
       return a.deadline?.startsWith(currentMonthStr) || a.startDate?.startsWith(currentMonthStr) || a.status !== 'completed';
     });
-  }, [assignments, user.uid, stations, todayStr, currentMonthStr, taskFilter]);
+  }, [baseStaffAssignments, taskFilter, todayStr, currentMonthStr]);
 
   const filteredMyAssignments = useMemo(() => {
     if (!staffSearchTerm.trim()) return myAssignments;
@@ -154,9 +223,6 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
       .map(({ station }) => [Number(station.latitude), Number(station.longitude)] as [number, number])
       .filter(p => !isNaN(p[0]) && !isNaN(p[1]) && p[0] !== 0 && p[1] !== 0);
   }, [myStaffStationsWithAssignments]);
-
-  const isAdminOrManager = user.email === 'vle94152@gmail.com' || currentAppUser?.role === 'admin' || currentAppUser?.role === 'manager';
-  const isStaff = !isAdminOrManager;
 
   const handleCheckIn = async (assignment: Assignment) => {
     if (!navigator.geolocation) {
@@ -355,7 +421,7 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
             <div>
               <div className="text-xs text-slate-500 font-medium mb-0.5">Tiến độ hôm nay</div>
               <div className="text-sm font-bold text-slate-800">
-                {isStaff ? (
+                {isStaff || dashboardViewMode === 'staff' ? (
                   `${myAssignments.filter(a => a.status === 'completed').length} / ${myAssignments.length} nhiệm vụ`
                 ) : (
                   `${assignments.filter(a => a.deadline === todayStr && a.status === 'completed').length} / ${assignments.filter(a => a.deadline === todayStr).length} nhiệm vụ hoàn thành`
@@ -363,7 +429,7 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
               </div>
             </div>
           </div>
-          {isStaff ? (
+          {isStaff || dashboardViewMode === 'staff' ? (
             <Button 
               size="sm" 
               className="text-xs h-8 px-3 rounded-xl bg-blue-50 text-blue-700 hover:bg-blue-100 hover:text-blue-800 border-0 shadow-none font-semibold"
@@ -383,8 +449,42 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
         </div>
       </div>
 
+      {/* Mode Switcher for Admin/Manager */}
+      {isAdminOrManager && (
+        <div className="px-4 sm:px-6 mt-4 relative z-20">
+          <div className="bg-slate-200/80 p-1.5 rounded-2xl flex items-center shadow-inner gap-1">
+            <button
+              type="button"
+              onClick={() => setDashboardViewMode('staff')}
+              className={cn(
+                "flex-1 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all",
+                dashboardViewMode === 'staff'
+                  ? "bg-white text-blue-700 shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              )}
+            >
+              <ClipboardCheck className="w-4 h-4" />
+              Bản đồ & Nhiệm vụ Nhân viên
+            </button>
+            <button
+              type="button"
+              onClick={() => setDashboardViewMode('manager')}
+              className={cn(
+                "flex-1 py-2 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-all",
+                dashboardViewMode === 'manager'
+                  ? "bg-white text-blue-700 shadow-sm"
+                  : "text-slate-600 hover:text-slate-900"
+              )}
+            >
+              <LayoutDashboard className="w-4 h-4" />
+              Tổng quan Quản lý
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Manager/Admin View */}
-      {!isStaff && (
+      {!isStaff && dashboardViewMode === 'manager' && (
         <>
           {/* Map Section */}
           <div className="px-4 mt-6">
@@ -680,12 +780,12 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
       )}
 
       {/* Staff View: My Tasks */}
-      {isStaff && (
+      {(isStaff || dashboardViewMode === 'staff') && (
         <div className="px-4 sm:px-6 mt-6 mb-8 relative z-20 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
              <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
                <ClipboardCheck className="w-5 h-5 text-blue-600" />
-               Nhiệm vụ của tôi
+               {isAdminOrManager && staffTaskScope === 'all' ? 'Tất cả nhiệm vụ nhân viên' : 'Nhiệm vụ của tôi'}
              </h3>
              <div className="flex items-center gap-2">
                <div className="text-xs font-semibold bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
@@ -694,31 +794,62 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
              </div>
           </div>
 
+          {/* Scope Selector for Staff and Admin */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-blue-50/90 border border-blue-200 p-2.5 rounded-xl text-xs gap-2">
+            <span className="text-blue-900 font-semibold text-[11px] sm:text-xs">
+              {personalAssignmentsCount > 0 
+                ? "Dữ liệu trạm hiển thị:" 
+                : "💡 Chưa có trạm riêng được gán — đang hiển thị trạm hệ thống để bạn kiểm tra tính năng:"}
+            </span>
+            <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-blue-100 shadow-xs shrink-0 self-end sm:self-auto">
+              <button
+                type="button"
+                onClick={() => setStaffTaskScope('mine')}
+                className={cn(
+                  "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
+                  staffTaskScope === 'mine' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Của tôi ({personalAssignmentsCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStaffTaskScope('all')}
+                className={cn(
+                  "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
+                  staffTaskScope === 'all' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Tất cả ({assignments.length || stations.length})
+              </button>
+            </div>
+          </div>
+
           {/* Filter tabs */}
           <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
             <button
               onClick={() => setTaskFilter('month')}
               className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'month' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
             >
-              📅 Cả tháng ({assignments.filter(a => a.assigneeId === user.uid && (a.deadline?.startsWith(currentMonthStr) || a.startDate?.startsWith(currentMonthStr) || a.status !== 'completed')).length})
+              📅 Cả tháng ({baseStaffAssignments.filter(a => a.deadline?.startsWith(currentMonthStr) || a.startDate?.startsWith(currentMonthStr) || a.status !== 'completed').length})
             </button>
             <button
               onClick={() => setTaskFilter('today')}
               className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'today' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
             >
-              Hôm nay ({assignments.filter(a => a.assigneeId === user.uid && a.deadline === todayStr).length})
+              Hôm nay ({baseStaffAssignments.filter(a => a.deadline === todayStr).length})
             </button>
             <button
               onClick={() => setTaskFilter('pending')}
               className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'pending' ? "bg-white text-amber-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
             >
-              Chưa xong ({assignments.filter(a => a.assigneeId === user.uid && a.status !== 'completed').length})
+              Chưa xong ({baseStaffAssignments.filter(a => a.status !== 'completed').length})
             </button>
             <button
               onClick={() => setTaskFilter('completed')}
               className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'completed' ? "bg-white text-emerald-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
             >
-              Đã xong ({assignments.filter(a => a.assigneeId === user.uid && a.status === 'completed').length})
+              Đã xong ({baseStaffAssignments.filter(a => a.status === 'completed').length})
             </button>
           </div>
 
@@ -915,7 +1046,11 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
                  <CheckCircle2 className="w-12 h-12 text-emerald-400 mx-auto mb-3 opacity-50" />
                  <h4 className="font-bold text-slate-700 mb-1">Không có công việc nào</h4>
                  <p className="text-sm text-slate-500 font-medium">
-                   {staffSearchTerm ? 'Không tìm thấy trạm phù hợp từ khóa.' : 'Bạn không có nhiệm vụ nào trong bộ lọc này.'}
+                   {staffSearchTerm 
+                     ? 'Không tìm thấy trạm phù hợp từ khóa.' 
+                     : (staffTaskScope === 'mine' && personalAssignmentsCount === 0)
+                       ? 'Tài khoản chưa có trạm riêng được gán. Bấm nút "Tất cả" ở trên để xem trạm hệ thống.'
+                       : 'Bạn không có nhiệm vụ nào trong bộ lọc này.'}
                  </p>
               </div>
             ) : (

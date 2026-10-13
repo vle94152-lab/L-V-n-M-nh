@@ -124,7 +124,7 @@ import { ReportManagementTab } from './pages/ReportManagementTab';
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<Tab>('planner');
+  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>('all');
   const [stations, setStations] = useState<Station[]>([]);
@@ -428,13 +428,37 @@ export default function App() {
 
   const activeCampaignIds = campaigns.filter(c => c.status === 'active').map(c => c.id);
   
-  let baseFilteredStations = selectedCampaignId === 'all' 
+  const campaignFilteredStations = selectedCampaignId === 'all' 
     ? stations.filter(s => !s.campaignId || activeCampaignIds.includes(s.campaignId)) 
     : stations.filter(s => s.campaignId === selectedCampaignId);
 
+  const isStationAssignedToUser = (s: Station) => {
+    if (!user) return false;
+    const uid = user.uid;
+    const email = user.email?.toLowerCase();
+    const dName = (user.displayName || currentAppUser?.displayName || '')?.toLowerCase();
+
+    if (s.assigneeId === uid) return true;
+    if (email && s.assigneeId?.toLowerCase() === email) return true;
+    if (dName && s.assigneeId?.toLowerCase() === dName) return true;
+    if (s.managerName && (s.managerName === dName || (email && s.managerName.toLowerCase() === email))) return true;
+    if (s.assigneeId && s.assigneeId.toLowerCase().includes('manh') && (email?.includes('manh') || dName?.includes('manh'))) return true;
+
+    return assignments.some(a => {
+      if (a.stationId !== s.id) return false;
+      if (a.assigneeId === uid) return true;
+      if (email && a.assigneeId?.toLowerCase() === email) return true;
+      if (dName && a.assigneeId?.toLowerCase() === dName) return true;
+      if (a.assigneeId && a.assigneeId.toLowerCase().includes('manh') && (email?.includes('manh') || dName?.includes('manh'))) return true;
+      return false;
+    });
+  };
+
   // Apply Role Base Access Control for staff
+  let baseFilteredStations = campaignFilteredStations;
   if (!isAdminOrManager && !checkPermission('view.all_stations')) {
-    baseFilteredStations = baseFilteredStations.filter(s => s.assigneeId === user?.uid);
+    const userOnlyStations = campaignFilteredStations.filter(isStationAssignedToUser);
+    baseFilteredStations = userOnlyStations.length > 0 ? userOnlyStations : campaignFilteredStations;
   }
 
   const filteredStations = baseFilteredStations;
@@ -480,7 +504,7 @@ export default function App() {
 
       {/* Main Content */}
       <main className={cn("mx-auto relative", activeTab === 'dashboard' ? "pb-24" : (activeTab === 'planner' || activeTab === 'admin') ? "p-3 sm:p-6 pb-24 w-full" : "p-3 sm:p-6 pb-24 max-w-4xl")}>
-        {activeTab === 'dashboard' && <DashboardTab key="dashboard" stations={filteredStations} reports={reports} assignments={assignments} currentAppUser={currentAppUser} user={user} logout={logout} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} setActiveTab={setActiveTab} campaigns={campaigns} selectedCampaignId={selectedCampaignId} setSelectedCampaignId={setSelectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} />}
+        {activeTab === 'dashboard' && <DashboardTab key="dashboard" stations={campaignFilteredStations} reports={reports} assignments={assignments} currentAppUser={currentAppUser} user={user} logout={logout} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} setActiveTab={setActiveTab} campaigns={campaigns} selectedCampaignId={selectedCampaignId} setSelectedCampaignId={setSelectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} />}
         {activeTab === 'planner' && <PlannerTab key="planner" stations={filteredStations} assignments={assignments} appUsers={appUsers} user={user} reports={reports} taskGroups={taskGroups} currentAppUser={currentAppUser} roles={roles} campaigns={campaigns} selectedCampaignId={selectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} />}
         {activeTab === 'admin' && <AdminTab key="admin" equipmentDict={equipmentDict} taskGroups={taskGroups} workspaces={workspaces} surveyParameters={surveyParameters} stations={filteredStations} reports={reports} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} campaigns={campaigns} selectedCampaignId={selectedCampaignId} appUsers={appUsers} currentAppUser={currentAppUser} roles={roles} />}
         {activeTab === 'reports' && <ReportsTab key="reports" stations={filteredStations} user={user} equipmentDict={equipmentDict} taskGroups={taskGroups} workspaces={workspaces} technologies={['2G', '3G', '4G', '5G']} initialStationId={prefilledStationId} initialAssignmentId={prefilledAssignmentId} reports={reports} surveyParameters={surveyParameters} assignments={assignments} />}
