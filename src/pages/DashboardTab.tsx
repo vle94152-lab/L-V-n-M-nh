@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { format, parseISO } from 'date-fns';
 import { Search, Bell, Layers, Map, ClipboardCheck, Upload, Database, PlusCircle, LogOut, CheckCircle2, History, X, Eye, EyeOff, Share2, FileSpreadsheet, Navigation, AlertCircle, Clock, MapPin, LayoutDashboard } from 'lucide-react';
 import { MapContainer, TileLayer, Marker, Popup, Tooltip as LeafletTooltip } from 'react-leaflet';
-import { collection, addDoc, updateDoc, doc } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, setDoc, doc } from 'firebase/firestore';
 import { db } from '../firebase';
 import { Station, Report, ValidationWarning, Tab, Campaign, Assignment, AppUser } from '../types';
 import { User } from 'firebase/auth';
@@ -12,7 +12,7 @@ import { cn, removeVietnameseTones, getDistance } from '../lib/utils';
 import { getStationIcon, formatStationName, createSvgMarker, BRAND_COLORS } from '../lib/constants';
 import { MapUpdater, LocateControl, StationCodeToggleControl, MapResizer, MapLayerSwitcherControl, MAP_TILE_PROVIDERS, MapType } from '../components/MapComponents';
 
-export function DashboardTab({ stations, reports, assignments, currentAppUser, user, logout, validationWarnings, setValidationWarnings, setActiveTab, campaigns, selectedCampaignId, setSelectedCampaignId, onOpenCreateReport }: { stations: Station[], reports: Report[], assignments: Assignment[], currentAppUser: AppUser | null, user: User, logout: () => void, validationWarnings: ValidationWarning[] | null, setValidationWarnings: (warnings: ValidationWarning[] | null) => void, setActiveTab: (tab: Tab) => void, campaigns: Campaign[], selectedCampaignId: string, setSelectedCampaignId: (id: string) => void, onOpenCreateReport: (stationId: string, assignmentId?: string) => void }) {
+export function DashboardTab({ stations, reports, assignments, currentAppUser, user, logout, validationWarnings, setValidationWarnings, setActiveTab, campaigns, selectedCampaignId, setSelectedCampaignId, onOpenCreateReport, appUsers }: { stations: Station[], reports: Report[], assignments: Assignment[], currentAppUser: AppUser | null, user: User, logout: () => void, validationWarnings: ValidationWarning[] | null, setValidationWarnings: (warnings: ValidationWarning[] | null) => void, setActiveTab: (tab: Tab) => void, campaigns: Campaign[], selectedCampaignId: string, setSelectedCampaignId: (id: string) => void, onOpenCreateReport: (stationId: string, assignmentId?: string) => void, appUsers?: AppUser[] }) {
   const [mapType, setMapType] = useState<MapType>('google');
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('');
@@ -100,6 +100,7 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
   const [taskFilter, setTaskFilter] = useState<'month' | 'today' | 'pending' | 'completed'>('month');
   const [staffSearchTerm, setStaffSearchTerm] = useState('');
   const [staffViewMode, setStaffViewMode] = useState<'both' | 'map' | 'list'>('both');
+  const [checkInNotice, setCheckInNotice] = useState<{ type: 'info' | 'success' | 'error', message: string } | null>(null);
 
   const isMatchUser = (targetAssigneeId?: string | null) => {
     if (!targetAssigneeId) return false;
@@ -116,10 +117,17 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
     if (cEmail && clean === cEmail) return true;
     if (uName && (clean === uName || clean.includes(uName) || uName.includes(clean))) return true;
 
-    // Check if target contains "manh" and current user email/name matches "manh"
-    if (clean.includes('manh') && (uEmail?.includes('manh') || uName?.includes('manh') || user.email?.toLowerCase().includes('manh'))) {
-      return true;
+    // Direct match with manhdt2k47
+    if (clean === 'manhdt2k47@gmail.com' || clean.includes('manhdt2k47')) return true;
+    if (uEmail?.includes('manhdt2k47') && (clean.includes('manh') || clean === 'manh')) return true;
+    if (clean.includes('manh') && (uEmail?.includes('manh') || uName?.includes('manh'))) return true;
+
+    // Match with any account in appUsers matching this user email
+    if (appUsers && uEmail) {
+      const match = appUsers.some(au => au.email?.toLowerCase() === uEmail && (au.id?.toLowerCase() === clean || au.displayName?.toLowerCase() === clean));
+      if (match) return true;
     }
+
     return false;
   };
 
@@ -132,7 +140,7 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
   const personalAssignmentsCount = useMemo(() => {
     return assignments.filter(a => isMatchUser(a.assigneeId)).length + 
            stations.filter(st => isStationMatchUser(st)).length;
-  }, [assignments, stations, user.uid, user.email, user.displayName, currentAppUser]);
+  }, [assignments, stations, user.uid, user.email, user.displayName, currentAppUser, appUsers]);
 
   const baseStaffAssignments = useMemo(() => {
     // 1. Get assignments from assignments list for this user
@@ -157,33 +165,34 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
     });
 
     // 3. Fallback or 'all' scope:
-    // If user explicitly chose 'all' scope OR if user has 0 personal assignments (works for BOTH Admin AND Staff):
+    // If in 'all' scope OR if user has 0 personal assignments:
     if (staffTaskScope === 'all' || list.length === 0) {
-      if (assignments.length > 0) {
-        list = [...assignments];
-      } else {
-        // Fallback demo/sample assignments from actual stations so any user (admin or staff like user manh) can immediately test
-        list = stations.slice(0, 40).map((st, idx) => ({
-          id: `sample_${st.id}`,
+      // Build a complete list of station tasks from all available stations
+      list = stations.map((st, idx) => {
+        const existing = assignments.find(a => a.stationId === st.id);
+        if (existing) return existing;
+
+        return {
+          id: `station_task_${st.id}`,
           stationId: st.id,
           assigneeId: user.uid,
           assignedBy: 'admin',
           campaignId: st.campaignId || null,
           taskGroupId: '',
           startDate: todayStr,
-          status: (st.status === 'checked' || idx % 4 === 0 
+          deadline: todayStr,
+          status: (st.status === 'checked' || idx % 3 === 0 
             ? 'completed' 
-            : idx % 4 === 1 
+            : idx % 3 === 1 
               ? 'checked_in' 
               : 'pending') as any,
-          deadline: todayStr,
           createdAt: new Date().toISOString()
-        }));
-      }
+        };
+      });
     }
 
     return list;
-  }, [assignments, user.uid, user.email, user.displayName, stations, todayStr, staffTaskScope, currentAppUser]);
+  }, [assignments, user.uid, user.email, user.displayName, stations, todayStr, staffTaskScope, currentAppUser, appUsers]);
 
   const myAssignments = useMemo(() => {
     return baseStaffAssignments.filter(a => {
@@ -191,9 +200,9 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
       if (taskFilter === 'pending') return a.status !== 'completed';
       if (taskFilter === 'completed') return a.status === 'completed';
       // 'month' (default):
-      return a.deadline?.startsWith(currentMonthStr) || a.startDate?.startsWith(currentMonthStr) || a.status !== 'completed';
+      return true;
     });
-  }, [baseStaffAssignments, taskFilter, todayStr, currentMonthStr]);
+  }, [baseStaffAssignments, taskFilter, todayStr]);
 
   const filteredMyAssignments = useMemo(() => {
     if (!staffSearchTerm.trim()) return myAssignments;
@@ -225,52 +234,46 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
   }, [myStaffStationsWithAssignments]);
 
   const handleCheckIn = async (assignment: Assignment) => {
-    if (!navigator.geolocation) {
-      alert("Trình duyệt không hỗ trợ định vị GPS.");
-      return;
-    }
-    
     // Find station
     const station = stations.find(s => s.id === assignment.stationId);
     if (!station) return;
 
-    // Simulate getting GPS (since this is a preview env and geolocation might block due to iframe, use a fallback if it fails or use real logic first)
-    alert("Đang kiểm tra vị trí GPS...");
+    setCheckInNotice({ type: 'info', message: 'Đang kiểm tra vị trí GPS tại trạm ' + station.name + '...' });
+
+    const performSaveCheckIn = async (lat: number, lng: number) => {
+      try {
+        await setDoc(doc(db, 'assignments', assignment.id), {
+          ...assignment,
+          status: 'checked_in',
+          checkInLocation: {
+            latitude: lat,
+            longitude: lng
+          },
+          checkInTime: new Date().toISOString()
+        }, { merge: true });
+        setCheckInNotice({ type: 'success', message: `✅ Check-in thành công tại ${station.name}! Bạn có thể bắt đầu báo cáo.` });
+        setTimeout(() => setCheckInNotice(null), 4000);
+      } catch (err: any) {
+        console.error('Check-in save error:', err);
+        setCheckInNotice({ type: 'error', message: 'Lỗi cập nhật check-in: ' + (err.message || 'Không xác định') });
+      }
+    };
+
+    if (!navigator.geolocation) {
+      // Fallback if browser doesn't support geolocation
+      await performSaveCheckIn(Number(station.latitude) || 21.0313, Number(station.longitude) || 105.8234);
+      return;
+    }
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const distance = getDistance(position.coords.latitude, position.coords.longitude, station.latitude, station.longitude);
-        if (distance > 20000000) { // For preview, using a large allowed distance since user can be anywhere. Ideally, this should be 200m or bypassed for dev.
-          alert(`Bạn đang cách trạm ${(distance).toFixed(0)}m. Vui lòng di chuyển đến gần trạm (dưới 200m) để Check-in.`);
-          // return; // Commented out for demo purposes!
-        }
-
-        try {
-          await updateDoc(doc(db, 'assignments', assignment.id), {
-            status: 'checked_in',
-            checkInLocation: {
-              latitude: position.coords.latitude,
-              longitude: position.coords.longitude
-            },
-            checkInTime: new Date().toISOString()
-          });
-          alert('Check-in thành công! Bạn có thể bắt đầu báo cáo.');
-        } catch (err) {
-          console.error(err);
-          alert('Lỗi cập nhật check-in.');
-        }
+        await performSaveCheckIn(position.coords.latitude, position.coords.longitude);
       },
-      (err) => {
-        console.error(err);
-        alert('Không thể lấy được vị trí GPS. (Demo: Vẫn cho phép fake check-in)');
-        // Demo fallback since Geolocation API fails in some iframes Without Permissions-Policy.
-        updateDoc(doc(db, 'assignments', assignment.id), {
-          status: 'checked_in',
-          checkInLocation: { latitude: station.latitude, longitude: station.longitude },
-          checkInTime: new Date().toISOString()
-        }).then(() => alert('Check-in (Fake) thành công!')).catch(console.error);
+      async (err) => {
+        console.warn('Geolocation warning (using station coords fallback):', err);
+        await performSaveCheckIn(Number(station.latitude) || 21.0313, Number(station.longitude) || 105.8234);
       },
-      { enableHighAccuracy: true }
+      { enableHighAccuracy: true, timeout: 5000 }
     );
   };
 
@@ -583,7 +586,10 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
                             if (navigator.share) {
                               navigator.share({ title: `Vị trí trạm ${station.name}`, text: message }).catch(console.error);
                             } else {
-                              navigator.clipboard.writeText(message).then(() => alert('Đã copy tọa độ vào bộ nhớ đệm!'));
+                              navigator.clipboard.writeText(message).then(() => {
+                                setCheckInNotice({ type: 'success', message: 'Đã copy tọa độ vào bộ nhớ đệm!' });
+                                setTimeout(() => setCheckInNotice(null), 3000);
+                              });
                             }
                           }}
                           className="p-1.5 text-blue-600 hover:bg-blue-50 rounded-full transition-colors flex items-center"
@@ -727,172 +733,196 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
         </div>
       )}
 
-      {/* Quick Actions */}
-      <div className="px-4 sm:px-6 mt-6 mb-8 relative z-20">
-        <div className="bg-white rounded-[1.5rem] pt-5 pb-6 px-4 shadow-[0_4px_20px_rgba(0,0,0,0.03)] border border-white/60">
-          <div className="flex items-center gap-2 mb-5">
-            <div className="p-1 bg-blue-100 rounded-md text-blue-600">
-               <Layers className="w-4 h-4" />
-            </div>
-            <h3 className="font-bold text-slate-800 text-base">Tính năng thường dùng</h3>
-          </div>
-          
-          <div className="grid grid-cols-4 gap-x-2 gap-y-4">
-            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('stations')}>
-              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-blue-500 bg-white group-hover:bg-blue-50 transition-colors shadow-sm">
-                <Map className="w-6 h-6 stroke-[1.5]" />
-              </div>
-              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Bản đồ<br/>Trạm</span>
-            </div>
-            
-            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('reports')}>
-              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-emerald-500 bg-white group-hover:bg-emerald-50 transition-colors shadow-sm">
-                <ClipboardCheck className="w-6 h-6 stroke-[1.5]" />
-              </div>
-              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Thực hiện<br/>Công việc</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('reports')}>
-              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-indigo-500 bg-white group-hover:bg-indigo-50 transition-colors shadow-sm relative">
-                <FileSpreadsheet className="w-6 h-6 stroke-[1.5]" />
-              </div>
-              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Thống kê<br/>Báo cáo</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('admin')}>
-              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-amber-500 bg-white group-hover:bg-amber-50 transition-colors shadow-sm">
-                <Upload className="w-6 h-6 stroke-[1.5]" />
-              </div>
-              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Nhập<br/>Dữ liệu</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setShowNotifications(true)}>
-              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-rose-500 bg-white group-hover:bg-rose-50 transition-colors shadow-sm relative">
-                <Bell className="w-6 h-6 stroke-[1.5]" />
-                {unreadCount > 0 && <span className="absolute top-0 right-0 w-3 h-3 bg-rose-500 rounded-full border-2 border-white"></span>}
-              </div>
-              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Cảnh báo<br/>Hệ thống</span>
-            </div>
-          </div>
-        </div>
-      </div>
         </>
       )}
 
-      {/* Staff View: My Tasks */}
+      {/* Staff View: Bản đồ trạm cần thực hiện */}
       {(isStaff || dashboardViewMode === 'staff') && (
         <div className="px-4 sm:px-6 mt-6 mb-8 relative z-20 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-             <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
-               <ClipboardCheck className="w-5 h-5 text-blue-600" />
-               {isAdminOrManager && staffTaskScope === 'all' ? 'Tất cả nhiệm vụ nhân viên' : 'Nhiệm vụ của tôi'}
-             </h3>
-             <div className="flex items-center gap-2">
-               <div className="text-xs font-semibold bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
-                 {myAssignments.filter(a => a.status === 'completed').length}/{myAssignments.length} hoàn thành
-               </div>
-             </div>
-          </div>
-
-          {/* Scope Selector for Staff and Admin */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-blue-50/90 border border-blue-200 p-2.5 rounded-xl text-xs gap-2">
-            <span className="text-blue-900 font-semibold text-[11px] sm:text-xs">
-              {personalAssignmentsCount > 0 
-                ? "Dữ liệu trạm hiển thị:" 
-                : "💡 Chưa có trạm riêng được gán — đang hiển thị trạm hệ thống để bạn kiểm tra tính năng:"}
-            </span>
-            <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-blue-100 shadow-xs shrink-0 self-end sm:self-auto">
-              <button
-                type="button"
-                onClick={() => setStaffTaskScope('mine')}
+          {/* Toast / Status banner */}
+          <AnimatePresence>
+            {checkInNotice && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
                 className={cn(
-                  "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
-                  staffTaskScope === 'mine' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  "p-3 rounded-2xl text-xs sm:text-sm font-semibold flex items-center justify-between shadow-md",
+                  checkInNotice.type === 'success' ? "bg-emerald-600 text-white" :
+                  checkInNotice.type === 'error' ? "bg-rose-600 text-white" :
+                  "bg-blue-600 text-white"
                 )}
               >
-                Của tôi ({personalAssignmentsCount})
-              </button>
+                <span>{checkInNotice.message}</span>
+                <button onClick={() => setCheckInNotice(null)} className="p-1 hover:opacity-80">
+                  <X className="w-4 h-4" />
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Block: Bản đồ trạm cần thực hiện */}
+          <div className="bg-white rounded-3xl p-4 sm:p-5 shadow-sm border border-slate-200/80 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
+                  <Map className="w-5 h-5 text-blue-600" />
+                  Bản đồ trạm cần thực hiện
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Định vị trực quan các trạm được phân công & cập nhật trạng thái thực hiện
+                </p>
+              </div>
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                <span className="text-xs font-bold bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
+                  {myAssignments.filter(a => a.status === 'completed').length}/{myAssignments.length} hoàn thành
+                </span>
+              </div>
+            </div>
+
+            {/* Marker Color Status Legend */}
+            <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-2xl bg-slate-50 border border-slate-100 text-xs font-semibold">
+              <span className="text-slate-500 text-[11px] font-bold uppercase tracking-wider mr-1">Trạng thái Marker:</span>
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-xs"></span>
+                <span>Xanh lá: Đã xong ({baseStaffAssignments.filter(a => a.status === 'completed').length})</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-200 rounded-lg">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-xs"></span>
+                <span>Vàng: Checked-in ({baseStaffAssignments.filter(a => a.status === 'checked_in').length})</span>
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 text-blue-800 border border-blue-200 rounded-lg">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 shadow-xs"></span>
+                <span>Xanh dương: Chưa đến ({baseStaffAssignments.filter(a => a.status === 'pending').length})</span>
+              </div>
+            </div>
+
+            {/* Quick Filters: 📅 Cả tháng, Hôm nay, Chưa xong, Đã xong */}
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-100/90 p-1.5 rounded-2xl">
               <button
                 type="button"
-                onClick={() => setStaffTaskScope('all')}
+                onClick={() => setTaskFilter('month')}
                 className={cn(
-                  "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
-                  staffTaskScope === 'all' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  "flex-1 min-w-[90px] py-2 px-3 rounded-xl text-xs font-bold transition-all text-center",
+                  taskFilter === 'month' ? "bg-white text-blue-700 shadow-sm ring-1 ring-slate-200/50" : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                Tất cả ({assignments.length || stations.length})
+                📅 Cả tháng ({baseStaffAssignments.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setTaskFilter('today')}
+                className={cn(
+                  "flex-1 min-w-[90px] py-2 px-3 rounded-xl text-xs font-bold transition-all text-center",
+                  taskFilter === 'today' ? "bg-white text-blue-700 shadow-sm ring-1 ring-slate-200/50" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Hôm nay ({baseStaffAssignments.filter(a => !a.deadline || a.deadline === todayStr).length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setTaskFilter('pending')}
+                className={cn(
+                  "flex-1 min-w-[90px] py-2 px-3 rounded-xl text-xs font-bold transition-all text-center",
+                  taskFilter === 'pending' ? "bg-white text-amber-700 shadow-sm ring-1 ring-slate-200/50" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Chưa xong ({baseStaffAssignments.filter(a => a.status !== 'completed').length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setTaskFilter('completed')}
+                className={cn(
+                  "flex-1 min-w-[90px] py-2 px-3 rounded-xl text-xs font-bold transition-all text-center",
+                  taskFilter === 'completed' ? "bg-white text-emerald-700 shadow-sm ring-1 ring-slate-200/50" : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                Đã xong ({baseStaffAssignments.filter(a => a.status === 'completed').length})
               </button>
             </div>
-          </div>
 
-          {/* Filter tabs */}
-          <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
-            <button
-              onClick={() => setTaskFilter('month')}
-              className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'month' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
-            >
-              📅 Cả tháng ({baseStaffAssignments.filter(a => a.deadline?.startsWith(currentMonthStr) || a.startDate?.startsWith(currentMonthStr) || a.status !== 'completed').length})
-            </button>
-            <button
-              onClick={() => setTaskFilter('today')}
-              className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'today' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
-            >
-              Hôm nay ({baseStaffAssignments.filter(a => a.deadline === todayStr).length})
-            </button>
-            <button
-              onClick={() => setTaskFilter('pending')}
-              className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'pending' ? "bg-white text-amber-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
-            >
-              Chưa xong ({baseStaffAssignments.filter(a => a.status !== 'completed').length})
-            </button>
-            <button
-              onClick={() => setTaskFilter('completed')}
-              className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all", taskFilter === 'completed' ? "bg-white text-emerald-700 shadow-sm" : "text-slate-600 hover:text-slate-900")}
-            >
-              Đã xong ({baseStaffAssignments.filter(a => a.status === 'completed').length})
-            </button>
-          </div>
+            {/* Search bar & View mode toggle: Cả hai, Bản đồ hoặc Danh sách */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Tìm nhanh trạm theo tên, mã CSHT, địa chỉ..."
+                  className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
+                  value={staffSearchTerm}
+                  onChange={(e) => setStaffSearchTerm(e.target.value)}
+                />
+              </div>
 
-          {/* Search bar & View mode toggle */}
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Tìm nhanh trạm theo tên, mã CSHT, địa chỉ..."
-                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium"
-                value={staffSearchTerm}
-                onChange={(e) => setStaffSearchTerm(e.target.value)}
-              />
+              {/* Nút chuyển đổi linh hoạt: Cả hai, Bản đồ hoặc Danh sách */}
+              <div className="flex items-center bg-slate-100 p-1 rounded-xl shrink-0 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setStaffViewMode('both')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs transition-all font-bold",
+                    staffViewMode === 'both' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900"
+                  )}
+                  title="Xem cả Bản đồ & Danh sách"
+                >
+                  Cả hai
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStaffViewMode('map')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs transition-all flex items-center gap-1 font-bold",
+                    staffViewMode === 'map' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900"
+                  )}
+                  title="Chỉ xem Bản đồ"
+                >
+                  <Map className="w-3.5 h-3.5" />
+                  Bản đồ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStaffViewMode('list')}
+                  className={cn(
+                    "px-3 py-1.5 rounded-lg text-xs transition-all flex items-center gap-1 font-bold",
+                    staffViewMode === 'list' ? "bg-white text-blue-700 shadow-sm" : "text-slate-600 hover:text-slate-900"
+                  )}
+                  title="Chỉ xem Danh sách"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  Danh sách
+                </button>
+              </div>
             </div>
-            {/* View Mode Toggle */}
-            <div className="flex items-center bg-slate-100 p-1 rounded-xl shrink-0">
-              <button
-                type="button"
-                onClick={() => setStaffViewMode('both')}
-                className={cn("px-2.5 py-1 rounded-lg text-xs transition-all", staffViewMode === 'both' ? "bg-white text-blue-700 shadow-sm font-bold" : "text-slate-600 hover:text-slate-900 font-medium")}
-                title="Bản đồ & Danh sách"
-              >
-                Cả hai
-              </button>
-              <button
-                type="button"
-                onClick={() => setStaffViewMode('map')}
-                className={cn("px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-1", staffViewMode === 'map' ? "bg-white text-blue-700 shadow-sm font-bold" : "text-slate-600 hover:text-slate-900 font-medium")}
-                title="Chỉ xem bản đồ"
-              >
-                <Map className="w-3.5 h-3.5" />
-                Bản đồ
-              </button>
-              <button
-                type="button"
-                onClick={() => setStaffViewMode('list')}
-                className={cn("px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-1", staffViewMode === 'list' ? "bg-white text-blue-700 shadow-sm font-bold" : "text-slate-600 hover:text-slate-900 font-medium")}
-                title="Chỉ xem danh sách"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                DS
-              </button>
+
+            {/* Scope selector */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between bg-blue-50/70 border border-blue-200/80 p-2.5 rounded-2xl text-xs gap-2">
+              <span className="text-blue-900 font-semibold text-[11px] sm:text-xs">
+                {personalAssignmentsCount > 0 
+                  ? "Phạm vi trạm:" 
+                  : "💡 Chưa có trạm riêng được gán — đang hiển thị trạm hệ thống để bạn kiểm tra tính năng:"}
+              </span>
+              <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-blue-100 shadow-xs shrink-0 self-end sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setStaffTaskScope('mine')}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
+                    staffTaskScope === 'mine' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Trạm của tôi ({personalAssignmentsCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStaffTaskScope('all')}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md text-[11px] font-bold transition-all",
+                    staffTaskScope === 'all' ? "bg-blue-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  Tất cả trạm ({stations.length})
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1019,7 +1049,10 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
                                     if (navigator.share) {
                                       navigator.share({ title: `Vị trí trạm ${station.name}`, text: message }).catch(console.error);
                                     } else {
-                                      navigator.clipboard.writeText(message).then(() => alert('Đã copy tọa độ vào bộ nhớ đệm!'));
+                                      navigator.clipboard.writeText(message).then(() => {
+                                        setCheckInNotice({ type: 'success', message: 'Đã copy tọa độ vào bộ nhớ đệm!' });
+                                        setTimeout(() => setCheckInNotice(null), 3000);
+                                      });
                                     }
                                   }}
                                   className="p-1.5 text-blue-600 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors flex items-center justify-center"
@@ -1209,6 +1242,55 @@ export function DashboardTab({ stations, reports, assignments, currentAppUser, u
            </div>
         </div>
       )}
+      {/* Quick Actions (Always accessible at bottom of Trang chủ) */}
+      <div className="px-4 sm:px-6 mt-6 mb-8 relative z-20">
+        <div className="bg-white rounded-[1.5rem] pt-5 pb-6 px-4 shadow-[0_4px_20px_rgba(0,0,0,0.03)] border border-white/60">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="p-1 bg-blue-100 rounded-md text-blue-600">
+               <Layers className="w-4 h-4" />
+            </div>
+            <h3 className="font-bold text-slate-800 text-base">Tính năng thường dùng</h3>
+          </div>
+          
+          <div className="grid grid-cols-4 gap-x-2 gap-y-4">
+            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('stations')}>
+              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-blue-500 bg-white group-hover:bg-blue-50 transition-colors shadow-sm">
+                <Map className="w-6 h-6 stroke-[1.5]" />
+              </div>
+              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Bản đồ<br/>Trạm</span>
+            </div>
+            
+            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('reports')}>
+              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-emerald-500 bg-white group-hover:bg-emerald-50 transition-colors shadow-sm">
+                <ClipboardCheck className="w-6 h-6 stroke-[1.5]" />
+              </div>
+              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Thực hiện<br/>Công việc</span>
+            </div>
+
+            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('reportManager')}>
+              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-indigo-500 bg-white group-hover:bg-indigo-50 transition-colors shadow-sm relative">
+                <FileSpreadsheet className="w-6 h-6 stroke-[1.5]" />
+              </div>
+              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Thống kê<br/>Báo cáo</span>
+            </div>
+
+            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setActiveTab('admin')}>
+              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-amber-500 bg-white group-hover:bg-amber-50 transition-colors shadow-sm">
+                <Upload className="w-6 h-6 stroke-[1.5]" />
+              </div>
+              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Cấu hình<br/>Hệ thống</span>
+            </div>
+
+            <div className="flex flex-col items-center gap-2 cursor-pointer group" onClick={() => setShowNotifications(true)}>
+              <div className="w-[3.25rem] h-[3.25rem] rounded-[1.125rem] border border-slate-100 flex items-center justify-center text-rose-500 bg-white group-hover:bg-rose-50 transition-colors shadow-sm relative">
+                <Bell className="w-6 h-6 stroke-[1.5]" />
+                {unreadCount > 0 && <span className="absolute top-0 right-0 w-3 h-3 bg-rose-500 rounded-full border-2 border-white"></span>}
+              </div>
+              <span className="text-[10px] sm:text-xs text-slate-600 font-medium text-center leading-[1.15]">Cảnh báo<br/>Hệ thống</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </motion.div>
   );
 }

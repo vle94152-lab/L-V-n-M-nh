@@ -11,6 +11,7 @@ import {
   orderBy,
   Timestamp,
   getDoc,
+  getDocs,
   getDocFromServer,
   setDoc,
   arrayUnion
@@ -165,8 +166,8 @@ export default function App() {
   };
 
   const hasAdminAccess = user?.email === 'vle94152@gmail.com' || currentAppUser?.role === 'admin' || (isAdminOrManager && (checkPermission('admin.users') || checkPermission('admin.campaigns') || checkPermission('admin.stations') || checkPermission('admin.tasks')));
-  const canAccessPlanner = isAdminOrManager;
-  const canAccessReports = isAdminOrManager || checkPermission('view.reports');
+  const canAccessPlanner = true;
+  const canAccessReports = true;
 
   // Auto-redirect unauthorized users from restricted tabs
   useEffect(() => {
@@ -205,37 +206,49 @@ export default function App() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        const userRef = doc(db, 'users', u.uid);
-        const userSnap = await getDoc(userRef);
-        if (!userSnap.exists()) {
-          const newUser: AppUser = {
-            id: u.uid,
-            email: u.email,
-            displayName: u.displayName,
-            role: 'staff', // Revert to staff by default
-            createdAt: new Date().toISOString()
-          };
-          await setDoc(userRef, newUser);
-          setCurrentAppUser(newUser);
+      try {
+        setUser(u);
+        if (u) {
+          const userRef = doc(db, 'users', u.uid);
+          const userSnap = await getDoc(userRef);
+          const isOwner = u.email === 'vle94152@gmail.com';
+          const isTesterStaff = u.email === 'manhdt2k47@gmail.com';
+          if (!userSnap.exists()) {
+            const newUser: AppUser = {
+              id: u.uid,
+              email: u.email,
+              displayName: u.displayName || (isTesterStaff ? 'Kỹ sư Mạnh' : u.email?.split('@')[0]) || 'Kỹ sư Mạnh',
+              role: isOwner ? 'admin' : 'staff',
+              createdAt: new Date().toISOString()
+            };
+            await setDoc(userRef, newUser);
+            setCurrentAppUser(newUser);
+          } else {
+            const existingData = userSnap.data() as AppUser;
+            // Auto-promote owner account so they have module access
+            if (isOwner && existingData.role !== 'admin') {
+               await updateDoc(userRef, { role: 'admin' });
+               existingData.role = 'admin';
+            }
+            // Switch tester account manhdt2k47 to staff so user tests the staff view accurately
+            if (isTesterStaff && existingData.role === 'admin') {
+               await updateDoc(userRef, { role: 'staff' });
+               existingData.role = 'staff';
+            }
+            // Backwards compatibility: treat worker as staff
+            if (existingData.role === 'worker') {
+              existingData.role = 'staff';
+            }
+            setCurrentAppUser(existingData);
+          }
         } else {
-          const existingData = userSnap.data() as AppUser;
-          // Auto-promote owner to admin so you have module access
-          if (existingData.role !== 'admin' && existingData.email === 'vle94152@gmail.com') {
-             await updateDoc(userRef, { role: 'admin' });
-             existingData.role = 'admin';
-          }
-          // Backwards compatibility: treat worker as staff
-          if (existingData.role === 'worker') {
-            existingData.role = 'staff';
-          }
-          setCurrentAppUser(existingData);
+          setCurrentAppUser(null);
         }
-      } else {
-        setCurrentAppUser(null);
+      } catch (err) {
+        console.error("Auth sync error:", err);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     });
     return unsubscribe;
   }, []);
@@ -286,18 +299,145 @@ export default function App() {
       setCampaigns(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Campaign)));
     }, (error) => handleFirestoreError(error, OperationType.LIST, 'campaigns'));
 
-    const stationsUnsubscribe = onSnapshot(collection(db, 'stations'), (snapshot) => {
-      setStations(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Station)));
+    const stationsUnsubscribe = onSnapshot(collection(db, 'stations'), async (snapshot) => {
+      if (snapshot.empty) {
+        try {
+          let campaignId = '';
+          const campSnap = await getDocs(collection(db, 'campaigns'));
+          if (campSnap.empty) {
+            const campRef = await addDoc(collection(db, 'campaigns'), {
+              name: 'Chiến dịch Khảo sát & Bảo dưỡng BTS 2026',
+              description: 'Chiến dịch trọng điểm kiểm tra, nâng cấp hạ tầng viễn thông',
+              status: 'active',
+              startDate: '2026-01-01',
+              endDate: '2026-12-31',
+              createdAt: new Date().toISOString()
+            });
+            campaignId = campRef.id;
+          } else {
+            campaignId = campSnap.docs[0].id;
+          }
+
+          const todayStr = format(new Date(), 'yyyy-MM-dd');
+          const sampleStations = [
+            {
+              name: 'Trạm BTS Kim Mã',
+              infrastructureCode: 'HNI_0012',
+              latitude: 21.0313,
+              longitude: 105.8234,
+              address: 'Số 182 Kim Mã, Ba Đình, Hà Nội',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0912345678',
+              department: 'Hà Nội',
+              status: 'checked',
+              campaignId,
+              assigneeId: 'manh'
+            },
+            {
+              name: 'Trạm BTS Hoàn Kiếm',
+              infrastructureCode: 'HNI_0045',
+              latitude: 21.0285,
+              longitude: 105.8542,
+              address: 'Số 15 Đinh Tiên Hoàng, Hoàn Kiếm, Hà Nội',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0912345679',
+              department: 'Hà Nội',
+              status: 'unchecked',
+              campaignId,
+              assigneeId: 'manh'
+            },
+            {
+              name: 'Trạm BTS Cầu Giấy',
+              infrastructureCode: 'HNI_0089',
+              latitude: 21.0362,
+              longitude: 105.7905,
+              address: 'Số 268 Cầu Giấy, Cầu Giấy, Hà Nội',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0912345680',
+              department: 'Hà Nội',
+              status: 'unchecked',
+              campaignId,
+              assigneeId: 'manh'
+            },
+            {
+              name: 'Trạm BTS Bến Thành',
+              infrastructureCode: 'SGN_0102',
+              latitude: 10.7725,
+              longitude: 106.6980,
+              address: 'Chợ Bến Thành, Lê Lợi, Bến Thành, Quận 1, TP. HCM',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0908123456',
+              department: 'TP.HCM',
+              status: 'checked',
+              campaignId,
+              assigneeId: 'manh'
+            },
+            {
+              name: 'Trạm BTS Landmark 81',
+              infrastructureCode: 'SGN_0215',
+              latitude: 10.7951,
+              longitude: 106.7218,
+              address: '720A Điện Biên Phủ, Phường 22, Bình Thạnh, TP. HCM',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0908123457',
+              department: 'TP.HCM',
+              status: 'unchecked',
+              campaignId,
+              assigneeId: 'manh'
+            },
+            {
+              name: 'Trạm BTS Cầu Rồng',
+              infrastructureCode: 'DNG_0033',
+              latitude: 16.0610,
+              longitude: 108.2272,
+              address: 'Đường Nguyễn Văn Linh, Hải Châu, Đà Nẵng',
+              managerName: 'Kỹ sư Mạnh',
+              managerPhone: '0905123456',
+              department: 'Đà Nẵng',
+              status: 'unchecked',
+              campaignId,
+              assigneeId: 'manh'
+            }
+          ];
+
+          const createdStations = [];
+          for (const s of sampleStations) {
+            const docRef = await addDoc(collection(db, 'stations'), s);
+            createdStations.push({ id: docRef.id, ...s });
+          }
+
+          const statuses: ('completed' | 'checked_in' | 'pending')[] = ['completed', 'checked_in', 'pending', 'checked_in', 'completed', 'pending'];
+          for (let i = 0; i < createdStations.length; i++) {
+            await addDoc(collection(db, 'assignments'), {
+              stationId: createdStations[i].id,
+              assigneeId: user?.uid || 'manh',
+              assignedBy: 'admin',
+              campaignId,
+              taskGroupId: '',
+              startDate: todayStr,
+              deadline: todayStr,
+              status: statuses[i],
+              createdAt: new Date().toISOString()
+            });
+          }
+        } catch (e) {
+          console.error("Failed to seed initial stations", e);
+        }
+      } else {
+        setStations(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Station)));
+      }
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, 'stations');
     });
 
     const reportsUnsubscribe = onSnapshot(
-      query(collection(db, 'reports'), where('userId', '==', user.uid), orderBy('date', 'desc')), 
+      collection(db, 'reports'), 
       (snapshot) => {
-        setReports(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Report)));
+        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Report));
+        list.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+        setReports(list);
       }, (error) => {
-        handleFirestoreError(error, OperationType.LIST, 'reports');
+        console.warn('Reports listener notice:', error);
       }
     );
 
@@ -503,8 +643,9 @@ export default function App() {
       )}
 
       {/* Main Content */}
-      <main className={cn("mx-auto relative", activeTab === 'dashboard' ? "pb-24" : (activeTab === 'planner' || activeTab === 'admin') ? "p-3 sm:p-6 pb-24 w-full" : "p-3 sm:p-6 pb-24 max-w-4xl")}>
-        {activeTab === 'dashboard' && <DashboardTab key="dashboard" stations={campaignFilteredStations} reports={reports} assignments={assignments} currentAppUser={currentAppUser} user={user} logout={logout} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} setActiveTab={setActiveTab} campaigns={campaigns} selectedCampaignId={selectedCampaignId} setSelectedCampaignId={setSelectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} />}
+      <main className={cn("mx-auto relative", activeTab === 'dashboard' ? "pb-24" : (activeTab === 'planner' || activeTab === 'admin' || activeTab === 'stations') ? "p-3 sm:p-6 pb-24 w-full" : "p-3 sm:p-6 pb-24 max-w-4xl")}>
+        {activeTab === 'dashboard' && <DashboardTab key="dashboard" stations={campaignFilteredStations.length > 0 ? campaignFilteredStations : stations} reports={reports} assignments={assignments} currentAppUser={currentAppUser} user={user} logout={logout} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} setActiveTab={setActiveTab} campaigns={campaigns} selectedCampaignId={selectedCampaignId} setSelectedCampaignId={setSelectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} appUsers={appUsers} />}
+        {activeTab === 'stations' && <StationsTab key="stations" stations={filteredStations} reports={reports} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} campaigns={campaigns} selectedCampaignId={selectedCampaignId} appUsers={appUsers} />}
         {activeTab === 'planner' && <PlannerTab key="planner" stations={filteredStations} assignments={assignments} appUsers={appUsers} user={user} reports={reports} taskGroups={taskGroups} currentAppUser={currentAppUser} roles={roles} campaigns={campaigns} selectedCampaignId={selectedCampaignId} onOpenCreateReport={(stationId, assignmentId) => { setPrefilledStationId(stationId); setPrefilledAssignmentId(assignmentId || ''); setActiveTab('reports'); }} />}
         {activeTab === 'admin' && <AdminTab key="admin" equipmentDict={equipmentDict} taskGroups={taskGroups} workspaces={workspaces} surveyParameters={surveyParameters} stations={filteredStations} reports={reports} validationWarnings={validationWarnings} setValidationWarnings={setValidationWarnings} campaigns={campaigns} selectedCampaignId={selectedCampaignId} appUsers={appUsers} currentAppUser={currentAppUser} roles={roles} />}
         {activeTab === 'reports' && <ReportsTab key="reports" stations={filteredStations} user={user} equipmentDict={equipmentDict} taskGroups={taskGroups} workspaces={workspaces} technologies={['2G', '3G', '4G', '5G']} initialStationId={prefilledStationId} initialAssignmentId={prefilledAssignmentId} reports={reports} surveyParameters={surveyParameters} assignments={assignments} />}

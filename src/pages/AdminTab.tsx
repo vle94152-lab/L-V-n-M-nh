@@ -129,6 +129,46 @@ export function AdminTab({ equipmentDict, taskGroups, workspaces, surveyParamete
   const [selectedShelf, setSelectedShelf] = useState<string>('All');
   const [showWorkspaceModal, setShowWorkspaceModal] = useState(false);
 
+  // Users Tab States
+  const [isAddingUser, setIsAddingUser] = useState(false);
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserRole, setNewUserRole] = useState('staff');
+
+  const handleAddUser = async () => {
+    if (!newUserEmail.trim()) {
+      alert('Vui lòng nhập email nhân viên.');
+      return;
+    }
+    try {
+      const email = newUserEmail.trim().toLowerCase();
+      const existing = appUsers.find(u => u.email?.toLowerCase() === email);
+      if (existing) {
+        await updateDoc(doc(db, 'users', existing.id), {
+          role: newUserRole,
+          displayName: newUserName.trim() || existing.displayName || email.split('@')[0]
+        });
+        alert(`Đã cập nhật vai trò cho ${email} thành ${newUserRole}!`);
+      } else {
+        const id = `user_${Date.now()}`;
+        await setDoc(doc(db, 'users', id), {
+          id,
+          email,
+          displayName: newUserName.trim() || email.split('@')[0],
+          role: newUserRole,
+          createdAt: new Date().toISOString()
+        });
+        alert(`Đã thêm tài khoản ${email} thành công!`);
+      }
+      setIsAddingUser(false);
+      setNewUserEmail('');
+      setNewUserName('');
+      setNewUserRole('staff');
+    } catch (err: any) {
+      alert(`Lỗi thêm nhân viên: ${err.message}`);
+    }
+  };
+
   const [confirmDialog, setConfirmDialog] = useState<{isOpen: boolean, title: string, message: string, onConfirm: () => void}>({
     isOpen: false, title: '', message: '', onConfirm: () => {}
   });
